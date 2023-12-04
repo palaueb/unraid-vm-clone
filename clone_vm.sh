@@ -1,7 +1,10 @@
 #!/bin/bash
 
+# Prompt the user for the name of the virtual machine to be cloned
+echo -n "Enter the name of the virtual machine to be cloned: "
+
 # List all VMs with their status
-echo "List of current Virtual Machines with their states:"
+echo "Listing Virtual Machines with their states:"
 virsh list --all --name | while read -r vm_name; do
     if [ -z "$vm_name" ]; then continue; fi  # Skip empty lines
     vm_state=$(virsh domstate "$vm_name")
@@ -10,7 +13,7 @@ done
 
 # Loop for VM selection
 while true; do
-    echo "Enter the name of the VM you want to select, it must be in 'shut off' state:"
+    echo "Enter the name of the VM you want to select:"
     read vm
 
     # Check if the VM exists
@@ -73,10 +76,16 @@ disks=$(xmllint --xpath "//domain/devices/disk[@device='disk']/source/@file" "${
 for disk in "${disks}"; do
         # obtain data of disk
         disk_format=$(qemu-img info "${disk}" | grep "file format" | awk '{ print $3 }')
+        #obtain new path for cloned disk
         new_volume_path=$(echo "$disk" | sed "s/$vm/$nnvm/g")
-        echo "MY DISK: $disk -> $disk_format -> $new_volume_path"
+        # get parent folder for disk and new volume
+        disk_dirname=$(dirname "${disk}")
         new_volume_dir=$(dirname "${new_volume_path}")
+        # create folder and maintain the user and group from the original disk parent folder
         mkdir -p "${new_volume_dir}"
+        chown $(stat -c "%U:%G" "${disk_dirname}") "${new_volume_dir}"
+
+        # clone disk depending on option
         if [[ "${cloning_method}" == "2" ]]; then
                 qemu-img create -f "${disk_format}" -F "${disk_format}" -o backing_file="${disk}" "${new_volume_path}"
         else
@@ -85,10 +94,25 @@ for disk in "${disks}"; do
         fi
 done
 
+#clone nvram if present
+nvram_path=$(xmllint --xpath "string(//domain/os/nvram)" "${temp_dump}" 2>/dev/null)
+
+if [[ -n "${nvram_path}" ]]; then
+    new_nvram_path="/var/lib/libvirt/qemu/nvram/${nnvm}_VARS.fd"
+    echo "Cloning NVRAM from ${nvram_path} to ${new_nvram_path}"
+    cp "${nvram_path}" "${new_nvram_path}"
+    sed -i "s#${nvram_path}#${new_nvram_path}#g" "${temp_dump}"
+else
+    echo "No NVRAM file found for the original VM, skipping NVRAM cloning."
+fi
+
+
+
 # delete current mac address
 sed -i '/<mac address=/d' "${temp_dump}"
-sed -i '/<nvram>/d' "${temp_dump}"
+# remove uuid, this forces the creation of a new uuid
 sed -i '/<uuid/d' "${temp_dump}"
+# replace current name for new name on the dumpxml for virsh
 sed -i "s#${vm}#${nnvm}#g" "${temp_dump}"
 
 
